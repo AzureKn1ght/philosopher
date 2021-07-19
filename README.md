@@ -1,6 +1,6 @@
 # The Philosopher
 
-This is my Tradingview Algo that I made. 
+This is my Tradingview Algo that I made for my bots. 
 
 This is the version that I am willing to share publicly. 
 
