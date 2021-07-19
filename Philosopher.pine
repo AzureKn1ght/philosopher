@@ -1,0 +1,381 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © AzureKn1ght
+
+//@version=4
+//
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ //
+//
+//  DESCRIPTION
+//  ===========
+//
+//  This TradingView strategy it is designed to integrate with other strategies with indicators. 
+//  It performs a trailing stop loss from entry and exit conditions. 
+//  In this strategy you can add conditions for long and short positions.
+//  The strategy will ride up your stop loss when there is price moviment.
+//  The strategy will close your operation when the market price crossed the stop loss.
+//  Also is possible to select the period that strategy will execute the backtest.
+//
+//  The strategy has the following parameters:
+//  INITIAL STOP LOSS - Where can isert the value to first stop.
+//  POSITION TYPE - Where can to select trade position.
+//  BACKTEST PERIOD - To select range.
+//  
+//
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ //
+
+strategy("PHILOSOPHER", overlay=true, initial_capital=100, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+
+//Strategy INPUTS
+stratSection = input(title = "════════════ Indicator Settings ════════════", defval = true, type = input.bool)
+useBarColor = input(false, title="Use Bar Color")
+smoothK = input(defval=14, title="STOCH %K Range", minval=1, step=1)
+smoothD = input(defval=3, title="STOCH %D Period", minval=1, step=1)
+smooth = input(defval=3, title="STOCH Smooth", minval=1, step=1)
+useCurrentRes = input(true, title="Use Current Chart Resolution STOCH")
+resCustom = input(title="Use Different Timeframe (Uncheck Box Above)", type=input.resolution, defval="720")
+res = useCurrentRes ? timeframe.period : resCustom
+
+
+//WAE Inputs
+sensitivity = input(150, title="Waddah Attar Explosion Sensitivity")
+fastLength = input(22, title="WAE FastEMA Length")
+slowLength = input(40, title="WAE SlowEMA Length")
+channelLength = input(23, title="WAE BB Channel Length")
+mult = input(2.0, title="WAE BB Stdev Multiplier")
+
+
+//Higher Timeframe Trend
+trendSection = input(title = "═════════════ Overall Trend ═════════════", defval = true, type = input.bool)
+base_len = input(title="Baseline Length (HMA)", defval=67)
+switchColor = input(title = "Colored Baseline", defval = true, type = input.bool)
+Hres = input(title="Higher Timeframe Resolution", type=input.resolution, defval="D")
+HtrendLength = input(title="Higher Timeframe Trend (HMA)", defval=59)
+
+
+///STOPLOSS SETTINGS ///
+stoplossSection = input(title = "═════════════ SL and TP ═════════════", defval = true, type = input.bool)
+atrRange = input(13, title="ATR Range", type=input.integer)
+buyStop = input(2.1, title="Buy SL (* ATR)", type=input.float) 
+sellStop = input(0.00, title="Sell SL (* ATR)", type=input.float)
+trailingTP = input(title = "Enable Trailing Take Profit", defval = false, type = input.bool)
+targetATR = input(3.3, title="TP1 (* ATR)", type=input.float) 
+moveToEntryFigure = input(2.1, title="Move Stop to Breakeven (* ATR)", type=input.float)
+
+
+//
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ //
+/// INDICATOR CALCULATIONS ///
+
+// Function to securely and simply call `security()` so that it never repaints and never looks ahead.
+f_secureSecurity(_symbol, _res, _src) => security(_symbol, _res, _src[1], lookahead = barmerge.lookahead_on)
+
+//CALCULATE WAE
+DEAD_ZONE = nz(rma(tr(true),100)) * 3.7
+calc_macd(source, fastLength, slowLength) =>
+    fastMA = ema(source, fastLength)
+    slowMA = ema(source, slowLength)
+    fastMA - slowMA
+
+calc_BBUpper(source, length, mult) =>
+    basis = sma(source, length)
+    dev = mult * stdev(source, length)
+    basis + dev
+
+calc_BBLower(source, length, mult) =>
+    basis = sma(source, length)
+    dev = mult * stdev(source, length)
+    basis - dev
+
+t1 = (calc_macd(close, fastLength, slowLength) - 
+   calc_macd(close[1], fastLength, slowLength)) * sensitivity
+t2 = (calc_macd(close[2], fastLength, slowLength) - 
+   calc_macd(close[3], fastLength, slowLength)) * sensitivity
+
+e1 = calc_BBUpper(close, channelLength, mult) - 
+   calc_BBLower(close, channelLength, mult)
+
+trendUp = t1 >= 0 
+trendDown = t1 < 0 
+upvalue = t1 >= 0 ? t1 : 0
+downValue = t1 < 0 ? -1 * t1 : 0
+
+
+//CALCULATE STOCH
+k = sma(stoch(close, high, low, smoothK), smooth)
+d = sma(k, smoothD)
+outK = f_secureSecurity(syminfo.tickerid, res, k)
+outD = f_secureSecurity(syminfo.tickerid, res, d)
+stochUP = outK > outD
+stochDown = outK < outD
+
+
+//CALCULATE BASELINE
+baseline = hma(close, base_len)
+abvBaseline = close > baseline 
+blwBaseline = close < baseline
+
+
+//CALCULATE Higher Timeframe Trend
+Hclose = f_secureSecurity(syminfo.tickerid, Hres, close)
+Htrend = f_secureSecurity(syminfo.tickerid, Hres, hma(close,HtrendLength))
+HpositiveTrend = close > Htrend and open > Htrend 
+HnegativeTrend = close < Htrend and open < Htrend 
+
+
+//
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ //
+/// ENTRY/EXIT CONDITIONS ///
+
+
+wae_buy_trigger = trendUp and (crossover(upvalue,e1) or (t1>e1 and t1>t1[1])) 
+wae_positive = trendUp and t1>e1
+
+wae_sell_trigger = trendDown and (crossover(downValue,e1) or (t1>e1 and t1>t1[1])) 
+wae_negative = trendDown and t1>e1
+
+
+//Entry Conditions
+longEntryCondition = barstate.isconfirmed and HpositiveTrend and abvBaseline and stochUP and wae_buy_trigger  
+shortEntryCondition = barstate.isconfirmed and HnegativeTrend and blwBaseline and stochDown and wae_sell_trigger
+
+
+//Take Profit Conditions 
+longCloseCondition = crossunder(outK,outD) and (not wae_positive)
+shortCloseCondition = crossover(outK,outD) and (not wae_negative)
+
+
+hasEntryLongConditional() => longEntryCondition == true
+hasCloseLongConditional() => longCloseCondition == true
+
+hasEntryShortConditional() => shortEntryCondition == true
+hasCloseShortConditional() => shortCloseCondition == true
+
+barcolor((useBarColor and longEntryCondition) ? #00ff00 : na)   
+barcolor((useBarColor and shortEntryCondition) ? #ff0000 : na) 
+
+
+//
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ //
+
+// === BACKTEST RANGE ===
+backTestSectionFrom = input(title = "═══════════════ FROM ═══════════════", defval = true, type = input.bool)
+
+FromMonth       = input(defval = 1, title = "Month", minval = 1)
+FromDay         = input(defval = 1, title = "Day", minval = 1)
+FromYear        = input(defval = 2014, title = "Year", minval = 2014)
+
+backTestSectionTo = input(title = "════════════════ TO ════════════════", defval = true, type = input.bool)
+ToMonth         = input(defval = 31, title = "Month", minval = 1)
+ToDay           = input(defval = 12, title = "Day", minval = 1)
+ToYear          = input(defval = 9999, title = "Year", minval = 2014)
+
+backTestPeriod() => (time > timestamp(FromYear, FromMonth, FromDay, 00, 00)) and (time < timestamp(ToYear, ToMonth, ToDay, 23, 59))
+
+//
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ //
+///STOPLOSS CALCULATIONS ///
+
+parameterSection = input(title = "═════════════ DIRECTION ═════════════", defval = true, type = input.bool)
+// === INPUT TO SELECT POSITION ===
+positionType = input(defval="LONG", title="Position Type", options=["LONG", "SHORT"])
+
+//Stoploss Values
+buyStopp = close - atr(atrRange) * buyStop
+sellStopp = close + atr(atrRange) * sellStop
+
+//Take Profit Values
+buyTP1 = close + atr(atrRange) * targetATR
+sellTP1 = close - atr(atrRange) * targetATR
+
+//Move to Breakeven Values
+buyMove = close + (atr(atrRange) * moveToEntryFigure)
+sellMove = close - (atr(atrRange) * moveToEntryFigure)
+
+
+// === INPUT TO SELECT INITIAL STOP LOSS
+initialStopLossPercent = (close - buyStopp) / close * 100.00 
+
+//
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ //
+
+// === GLOBAL VARIABLES AND FUNCTIONS TO STORE IMPORTANT CONDITIONALS
+stopLossPercent = positionType == "LONG" ? initialStopLossPercent * -1 : initialStopLossPercent
+
+var entryPrice = 0.0
+var updatedEntryPrice = 0.0
+var stopLossPrice = 0.0
+var takeProfit = 0.0
+var moveToBreakeven = 0.0
+var enableTrailing = false
+var closeTrade = false
+var TPhit = false
+
+hasOpenTrade() => strategy.opentrades != 0
+notHasOpenTrade() => strategy.opentrades == 0
+
+
+strategyClose() =>
+    if positionType == "LONG"
+        strategy.close("LONG", when=true, comment="Closed Long") 
+    else 
+        strategy.close("SHORT", when=true, comment="Closd Short")
+
+strategyOpen() =>
+    if positionType == "LONG"
+        strategy.entry("LONG", strategy.long, when=true, comment="Going Long") 
+    else 
+        strategy.entry("SHORT", strategy.short, when=true, comment="Going Short")
+
+isLong() => positionType == "LONG" ? true : false
+isShort() => positionType == "SHORT" ? true : false
+
+
+//
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ //
+
+// === LOGIC TO TRAILING STOP IN LONG POSITION
+if (isLong() and backTestPeriod())
+
+    //Check Stops
+    if (hasOpenTrade() and high>=takeProfit)
+        TPhit := true
+        stopLossPrice := max(stopLossPrice, entryPrice) 
+    crossedStopLoss = close <= stopLossPrice
+
+
+    if (TPhit and (not trailingTP))
+        closeTrade := true
+
+    if (hasOpenTrade() and hasCloseLongConditional() and TPhit)
+        closeTrade := true
+        
+    
+    //Terminate Trade or Not    
+    terminateOperation = hasOpenTrade() and (crossedStopLoss or closeTrade)
+
+    if (terminateOperation)
+        entryPrice := 0.0
+        updatedEntryPrice := entryPrice
+        stopLossPrice := 0.0
+        takeProfit := 0.0
+        moveToBreakeven := 0.0
+        enableTrailing := false
+        closeTrade := false
+        TPhit := false
+        strategyClose()
+    
+    startOperation = notHasOpenTrade() and hasEntryLongConditional()
+
+    if(startOperation)
+        entryPrice := close
+        updatedEntryPrice := entryPrice
+        stopLossPrice := buyStopp 
+        takeProfit := buyTP1
+        moveToBreakeven := buyMove
+        enableTrailing := false
+        TPhit := false
+        strategyOpen()
+        
+        
+    if (hasOpenTrade() and close > moveToBreakeven)
+        stopLossPrice := max(stopLossPrice, entryPrice) 
+        enableTrailing := true
+        
+
+    strategyPercentege = (close - updatedEntryPrice) / updatedEntryPrice * 100.00 
+    rideUpStopLoss = hasOpenTrade() and strategyPercentege > 1 
+
+
+    if (isLong() and rideUpStopLoss and enableTrailing and trailingTP)
+        stopLossPercent := stopLossPercent + strategyPercentege - 1.0
+        newStopLossPrice = updatedEntryPrice + (updatedEntryPrice * stopLossPercent) / 100  
+        stopLossPrice := max(stopLossPrice, newStopLossPrice)
+        updatedEntryPrice := stopLossPrice
+
+
+//
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ //
+
+// === LOGIC TO TRAILING STOP IN SHORT POSITION
+if (isShort() and backTestPeriod())
+
+    //Check Stops
+    if (hasOpenTrade() and low<=takeProfit)
+        TPhit := true
+        stopLossPrice := min(stopLossPrice, entryPrice) 
+    crossedStopLoss = close >= stopLossPrice
+    
+    
+    if (TPhit and (not trailingTP))
+        closeTrade := true
+        
+    if (hasOpenTrade() and hasCloseShortConditional() and TPhit)
+        closeTrade := true
+        
+    
+    //Terminate Trade or Not    
+    terminateOperation = hasOpenTrade() and (crossedStopLoss or closeTrade)
+
+
+    if (terminateOperation)
+        entryPrice := 0.0
+        updatedEntryPrice := entryPrice
+        stopLossPrice := 0.0
+        takeProfit := 0.0
+        moveToBreakeven := 0.0
+        enableTrailing := false
+        closeTrade := false
+        TPhit := false
+        strategyClose()
+        
+    startOperation = notHasOpenTrade() and hasEntryShortConditional()
+
+    if(startOperation)
+        entryPrice := close
+        updatedEntryPrice := entryPrice
+        stopLossPrice := sellStopp
+        takeProfit := sellTP1
+        moveToBreakeven := sellMove
+        enableTrailing := false
+        TPhit := false
+        strategyOpen()
+
+
+    if (hasOpenTrade() and close < moveToBreakeven)
+        stopLossPrice := min(stopLossPrice, entryPrice) 
+        enableTrailing := true
+
+        
+    strategyPercentege = (close - updatedEntryPrice) / updatedEntryPrice * 100.00
+    rideDownStopLoss = hasOpenTrade() and strategyPercentege < 0 //or -1?
+
+
+    if (rideDownStopLoss and enableTrailing and trailingTP)
+        stopLossPercent := stopLossPercent + strategyPercentege + 1.0
+        newStopLossPrice = updatedEntryPrice + (updatedEntryPrice * stopLossPercent) / 100  
+        stopLossPrice := min(stopLossPrice, newStopLossPrice)
+        updatedEntryPrice := stopLossPrice
+    
+
+//
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ //
+
+// === DRAWING SHAPES 
+
+entryPricePlotConditinal = entryPrice == 0.0 ? na : entryPrice
+trailingStopLossPlotConditional = stopLossPrice == 0.0  ? na : stopLossPrice
+takeProfitPlotConditional = takeProfit == 0.0  ? na : takeProfit
+
+plotshape(entryPricePlotConditinal, title= "Entry Price", color=color.blue, style=shape.circle, location=location.absolute, size=size.tiny)
+plotshape(trailingStopLossPlotConditional, title= "Stop Loss", color=color.red, style=shape.circle, location=location.absolute, size=size.tiny)
+plotshape(takeProfitPlotConditional, title= "Take Profit", color=color.green, style=shape.circle, location=location.absolute, size=size.tiny)
+
+
+maColor = switchColor ? (trendUp ? #00ff00 : #ff0000) : #ffffff
+plot(baseline, title="Baseline (HMA)", color=maColor, linewidth=4)
+
+
+hma = hma(close, HtrendLength)
+hmaSmooth = security(syminfo.tickerid, Hres, hma[barstate.isrealtime ? 1 : 0], gaps=barmerge.gaps_on)
+plot(hmaSmooth, color=color.white, linewidth=2, title="Higher Timeframe Trend")
